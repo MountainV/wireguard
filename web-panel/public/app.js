@@ -23,14 +23,56 @@ async function api(path, opts = {}) {
     } catch { return { status: 0, body: {} }; }
 }
 function toast(msg, type='') { const t=$('toast'); t.textContent=msg; t.className='toast '+type; clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),3200); }
+function showModal(content, focusSelector){
+    $('modalInner').innerHTML=content;
+    $('modal').classList.remove('hidden');
+    requestAnimationFrame(()=>$(focusSelector)?.focus());
+}
+function setFormError(message, inputId){
+    const error=$('modalError');
+    if(error){error.textContent=message;error.classList.remove('hidden');}
+    if(inputId){
+        const input=$(inputId);
+        if(input){input.classList.add('invalid');input.setAttribute('aria-invalid','true');input.focus();}
+    }
+}
+function clearFormError(){
+    const error=$('modalError');
+    if(error){error.textContent='';error.classList.add('hidden');}
+    document.querySelectorAll('#modalInner .invalid').forEach(input=>{
+        input.classList.remove('invalid');
+        input.removeAttribute('aria-invalid');
+    });
+}
+function openConfirmDialog(title,message,actionLabel,onConfirm){
+    showModal(`<div class="modal-head"><h3>${esc(title)}</h3><button class="modal-x" type="button" aria-label="Schließen" onclick="closeModal()">✕</button></div>
+        <div class="form"><p class="dialog-copy">${esc(message)}</p><p id="modalError" class="form-error hidden" role="alert"></p>
+        <div class="modal-actions"><button class="actbtn" type="button" onclick="closeModal()">Abbrechen</button><button id="modalConfirm" class="btn-danger" type="button">${esc(actionLabel)}</button></div></div>`, 'modalConfirm');
+    $('modalConfirm').addEventListener('click',async()=>{
+        const button=$('modalConfirm');
+        button.disabled=true;
+        try{
+            const result=await onConfirm();
+            if(result?.ok)closeModal();
+            else setFormError(result?.error||'Aktion fehlgeschlagen.');
+        }catch(error){
+            setFormError(error instanceof Error?error.message:'Aktion fehlgeschlagen.');
+        }finally{
+            if($('modalConfirm'))$('modalConfirm').disabled=false;
+        }
+    });
+}
 function setConn(ok){ const d=$('connDot'),t=$('connText'); d.className='dot '+(ok?'on':'off'); t.textContent=ok?'Server verbunden':'Server offline'; }
 function setDb(ok){ const d=$('dbDot'),t=$('dbText'); d.className='dot '+(ok?'on':'off'); t.textContent='DB: '+(ok?'verbunden':'aus'); }
 
 // ── auth ──
 $('loginForm').addEventListener('submit', async (e)=>{ e.preventDefault();
     const r=await api('login',{method:'POST',body:JSON.stringify({username:$('user').value,password:$('pass').value})});
-    if(r.status===200){ myRole=r.body.role||'viewer'; applyRole(); setIdentity($('user').value,myRole); showDash(); } else $('loginErr').classList.remove('hidden');
+    if(r.status===200){ $('loginErr').classList.add('hidden'); myRole=r.body.role||'viewer'; applyRole(); setIdentity($('user').value,myRole); showDash(); }
+    else {$('loginErr').textContent=r.status===0?'Server nicht erreichbar.':'Benutzername oder Passwort ist falsch.';$('loginErr').classList.remove('hidden');}
 });
+$('user').addEventListener('input',()=>$('loginErr').classList.add('hidden'));
+$('pass').addEventListener('input',()=>$('loginErr').classList.add('hidden'));
 $('logout').addEventListener('click', async ()=>{ await api('logout',{method:'POST'}); stopPolling(); $('dash').classList.add('hidden'); $('login').classList.remove('hidden'); });
 async function checkAuth(){ const r=await api('me'); dbOn=!!(r.body&&r.body.db); setDb(dbOn); myRole=(r.body&&r.body.role)||'viewer'; applyRole(); if(r.body&&r.body.user){ setIdentity(r.body.user,myRole); showDash(); } }
 function showDash(){ $('login').classList.add('hidden'); $('dash').classList.remove('hidden'); refreshAll(); startPolling(); }
@@ -70,11 +112,25 @@ async function loadFeed(){ const r=await api('feed'); feedCache=(r.status===200)
 async function loadHistory(){ const r=await api('history'); histCache=(r.status===200&&r.body.history)?r.body.history:[]; renderHistory(); }
 async function loadBans(){ const r=await api('bans'); const bans=(r.status===200&&r.body.bans)?r.body.bans:[];
     $('bBody').innerHTML=bans.map((b,i)=>`<tr style="animation-delay:${i*.03}s"><td>${esc(b.ban_id||b.id)}</td><td>${esc(b.name)}</td><td>${esc(b.reason)}</td><td>${esc(b.bannedBy||b.banned_by)}</td><td>${fmtDate(b.time||b.created_at)}</td><td class="cell-sub">${esc((b.identifiers&&b.identifiers.license)||b.license||'—')}</td><td><button class="actbtn unban" data-id="${esc(b.ban_id||b.id)}">Entbannen</button></td></tr>`).join('')||'<tr><td colspan="7" class="empty">Keine Bans.</td></tr>';
-    $('bBody').querySelectorAll('.unban').forEach(btn=>btn.addEventListener('click',async()=>{ const r=await api('unban',{method:'POST',body:JSON.stringify({banId:btn.dataset.id})}); if(r.status===200){toast('Entbannt','ok');loadBans();loadStats();}else toast('Fehler: '+(r.body.error||'Ban nicht gefunden'),'err'); }));
+    $('bBody').querySelectorAll('.unban').forEach(btn=>btn.addEventListener('click',()=>{
+        const banId=btn.dataset.id;
+        openConfirmDialog('Ban aufheben',`Soll der Ban ${banId} wirklich aufgehoben werden?`,'Entbannen',async()=>{
+            const result=await api('unban',{method:'POST',body:JSON.stringify({banId})});
+            if(result.status===200){toast('Ban aufgehoben','ok');loadBans();loadStats();return {ok:true};}
+            return {ok:false,error:result.body.error||'Ban konnte nicht aufgehoben werden.'};
+        });
+    }));
 }
 async function loadAdmins(){ const r=await api('admins'); const admins=(r.status===200&&r.body.admins)?r.body.admins:[];
     $('aBody').innerHTML=admins.map((a,i)=>`<tr style="animation-delay:${i*.03}s"><td class="cell-sub">${esc(a.license)}</td><td>${esc(a.name)}</td><td><span class="chip">${esc(a.rank)}</span></td><td>${esc(a.added_by)}</td><td>${fmtDate(a.created_at)}</td><td><button class="actbtn ban" data-lic="${esc(a.license)}">Entfernen</button></td></tr>`).join('')||'<tr><td colspan="6" class="empty">Keine Admins.</td></tr>';
-    $('aBody').querySelectorAll('.ban').forEach(btn=>btn.addEventListener('click',async()=>{ const r=await api('removeadmin',{method:'POST',body:JSON.stringify({license:btn.dataset.lic})}); if(r.status===200){toast('Admin entfernt','ok');loadAdmins();}else toast('Fehler','err'); }));
+    $('aBody').querySelectorAll('.ban').forEach(btn=>btn.addEventListener('click',()=>{
+        const license=btn.dataset.lic;
+        openConfirmDialog('Admin entfernen',`Admin-Rechte für ${license} wirklich entfernen?`,'Entfernen',async()=>{
+            const result=await api('removeadmin',{method:'POST',body:JSON.stringify({license})});
+            if(result.status===200){toast('Admin entfernt','ok');loadAdmins();return {ok:true};}
+            return {ok:false,error:result.body.error||'Admin konnte nicht entfernt werden.'};
+        });
+    }));
 }
 async function loadLogs(){ const r=await api('logs'); const logs=(r.status===200&&r.body.logs)?r.body.logs:[];
     $('lBody').innerHTML=logs.map((l,i)=>`<tr style="animation-delay:${i*.03}s"><td>${fmtDate(l.created_at||l.time)}</td><td>${esc(l.admin)}</td><td><span class="chip">${esc(l.action)}</span></td><td>${esc(l.target)}</td><td class="cell-sub">${esc(l.detail)}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">Keine Logs.</td></tr>';
@@ -137,11 +193,39 @@ function renderPlayers(){ const q=$('pSearch').value.toLowerCase();
     $('pBody').querySelectorAll('.actbtn').forEach(btn=>btn.addEventListener('click',()=>playerAction(btn.dataset.a,parseInt(btn.dataset.id,10))));
 }
 async function playerAction(type,id){
-    let reason=''; if(['ban','kick','warn','message'].includes(type)) reason=prompt(type==='message'?'Nachricht:':`${actDE(type)} – Grund:`,'')??'';
+    if(['ban','kick','warn','message'].includes(type)){
+        const title=type==='message'?'Nachricht senden':`${actDE(type)} · Spieler ${id}`;
+        const description=type==='ban'?'Der Spieler wird dauerhaft gebannt.':type==='kick'?'Der Spieler wird vom Server getrennt.':type==='warn'?'Der Spieler erhält eine Verwarnung.':'Schreibe die Nachricht an den Spieler.';
+        const actionLabel=type==='ban'?'Bannen':type==='kick'?'Kicken':type==='warn'?'Verwarnen':'Senden';
+        showModal(`<div class="modal-head"><h3>${esc(title)}</h3><button class="modal-x" type="button" aria-label="Schließen" onclick="closeModal()">✕</button></div>
+            <div class="form"><p class="dialog-copy">${esc(description)}</p>
+            <label class="fl" for="f_action_reason">${type==='message'?'Nachricht':type==='warn'?'Hinweis (optional)':'Grund (optional)'}
+            <textarea id="f_action_reason" maxlength="500" placeholder="${type==='message'?'Nachricht eingeben…':'Grund hinzufügen…'}"></textarea></label>
+            <p id="modalError" class="form-error hidden" role="alert"></p>
+            <div class="modal-actions"><button class="actbtn" type="button" onclick="closeModal()">Abbrechen</button>
+            <button class="${type==='ban'||type==='kick'?'btn-danger':'btn-primary sm'}" type="button" onclick="submitPlayerAction('${type}',${id})">${actionLabel}</button></div></div>`, 'f_action_reason');
+        return;
+    }
+    await sendPlayerAction(type,id,'');
+}
+window.submitPlayerAction=async(type,id)=>{
+    const reason=$('f_action_reason').value.trim();
+    if(type==='message'&&!reason)return setFormError('Bitte gib eine Nachricht ein.','f_action_reason');
+    const button=$('modalInner').querySelector('.modal-actions button:last-child');
+    button.disabled=true;
+    const result=await sendPlayerAction(type,id,reason,true);
+    if(!result)button.disabled=false;
+};
+async function sendPlayerAction(type,id,reason,keepModal=false){
     let ep='action',payload={type,target:id,reason,by:myUser};
     if(type==='kick')ep='kick'; if(type==='ban')ep='ban';
     const r=await api(ep,{method:'POST',body:JSON.stringify(payload)});
-    if(r.status===200){toast(`${actDE(type)} ausgeführt`,'ok'); setTimeout(refreshAll,400);} else toast(`Fehler: ${r.body.error||'Server offline'}`,'err');
+    if(r.status===200){
+        closeModal();toast(`${actDE(type)} ausgeführt`,'ok');setTimeout(refreshAll,400);return true;
+    }
+    const message=`Fehler: ${r.body.error||(r.status===0?'Server nicht erreichbar.':'Aktion fehlgeschlagen.')}`;
+    if(keepModal)setFormError(message,'f_action_reason');else toast(message,'err');
+    return false;
 }
 
 function renderFeed(feed,elId){ $(elId).innerHTML=(feed||[]).map((f,i)=>`
@@ -195,13 +279,13 @@ $('addBanBtn').addEventListener('click',()=>{ $('modalInner').innerHTML=formHTML
     ['name','Name'],['license','Lizenz (license:...)'],['discord','Discord ID (optional)'],['reason','Grund']],'submitBan'); $('modal').classList.remove('hidden'); });
 $('addAdminBtn').addEventListener('click',()=>{ $('modalInner').innerHTML=formHTML('Admin hinzufügen',[
     ['license','Lizenz (license:...)'],['name','Name'],['rank','Rang (z.B. admin / mod)']],'submitAdmin'); $('modal').classList.remove('hidden'); });
-function formHTML(title,fields,fn){ return `<div class="modal-head"><h3>${title}</h3><button class="modal-x" onclick="closeModal()">✕</button></div>
-    <div class="form">${fields.map(f=>`<label class="fl">${f[1]}<input id="f_${f[0]}" placeholder="${f[1]}"/></label>`).join('')}
-    <button class="btn-primary" onclick="${fn}()">Speichern</button></div>`; }
+function formHTML(title,fields,fn){ return `<div class="modal-head"><h3>${esc(title)}</h3><button class="modal-x" type="button" aria-label="Schließen" onclick="closeModal()">✕</button></div>
+    <div class="form">${fields.map(f=>`<label class="fl" for="f_${f[0]}">${esc(f[1])}<input id="f_${f[0]}" placeholder="${esc(f[1])}"/></label>`).join('')}
+    <p id="modalError" class="form-error hidden" role="alert"></p><button class="btn-primary" type="button" onclick="${fn}()">Speichern</button></div>`; }
 window.submitBan=async()=>{ const b={name:$('f_name').value,license:$('f_license').value,discord:$('f_discord').value,reason:$('f_reason').value,by:myUser};
-    if(!b.license&&!b.discord)return toast('Lizenz oder Discord nötig','err'); const r=await api('addban',{method:'POST',body:JSON.stringify(b)}); if(r.status===200){toast('Ban erstellt','ok');closeModal();loadBans();}else toast('Fehler: '+(r.body.error||''),'err'); };
+    if(!b.license&&!b.discord)return setFormError('Bitte gib eine Lizenz oder Discord-ID ein.','f_license'); const r=await api('addban',{method:'POST',body:JSON.stringify(b)}); if(r.status===200){toast('Ban erstellt','ok');closeModal();loadBans();}else setFormError(r.body.error||'Ban konnte nicht erstellt werden.',b.license?'f_license':'f_discord'); };
 window.submitAdmin=async()=>{ const a={license:$('f_license').value,name:$('f_name').value,rank:$('f_rank').value||'admin',by:myUser};
-    if(!a.license)return toast('Lizenz nötig','err'); const r=await api('addadmin',{method:'POST',body:JSON.stringify(a)}); if(r.status===200){toast('Admin hinzugefügt','ok');closeModal();loadAdmins();}else toast('Fehler','err'); };
+    if(!a.license)return setFormError('Bitte gib eine Lizenz ein.','f_license'); const r=await api('addadmin',{method:'POST',body:JSON.stringify(a)}); if(r.status===200){toast('Admin hinzugefügt','ok');closeModal();loadAdmins();}else setFormError(r.body.error||'Admin konnte nicht hinzugefügt werden.','f_license'); };
 
 // ── sparkline ──
 function drawSpark(){ const cv=$('spark'); if(!cv)return; const ctx=cv.getContext('2d'); const w=cv.clientWidth,h=cv.height; cv.width=w; ctx.clearRect(0,0,w,h);
@@ -362,34 +446,49 @@ async function loadUsers(){
             <button class="actbtn" data-pw="${esc(u.username)}">Passwort</button>
             <button class="actbtn ban" data-del="${esc(u.username)}">Löschen</button>
         </td></tr>`).join('')||'<tr><td colspan="5" class="empty">Keine Benutzer.</td></tr>';
-    $('uBody').querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{
-        if(!confirm('Benutzer "'+b.dataset.del+'" wirklich löschen?'))return;
-        const r=await api('users/delete',{method:'POST',body:JSON.stringify({username:b.dataset.del})});
-        if(r.status===200){toast('Benutzer gelöscht','ok');loadUsers();}else toast('Fehler: '+(r.body.error||''),'err');
+    $('uBody').querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',()=>{
+        const username=b.dataset.del;
+        openConfirmDialog('Benutzer löschen',`Möchtest du „${username}“ wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.`,'Benutzer löschen',async()=>{
+            const result=await api('users/delete',{method:'POST',body:JSON.stringify({username})});
+            if(result.status===200){toast('Benutzer gelöscht','ok');loadUsers();return {ok:true};}
+            return {ok:false,error:result.body.error||'Benutzer konnte nicht gelöscht werden.'};
+        });
     }));
-    $('uBody').querySelectorAll('[data-pw]').forEach(b=>b.addEventListener('click',async()=>{
-        const pw=prompt('Neues Passwort für "'+b.dataset.pw+'":'); if(!pw)return;
-        const r=await api('users/password',{method:'POST',body:JSON.stringify({username:b.dataset.pw,password:pw})});
-        if(r.status===200)toast('Passwort geändert','ok');else toast('Fehler: '+(r.body.error||''),'err');
+    $('uBody').querySelectorAll('[data-pw]').forEach(b=>b.addEventListener('click',()=>{
+        const username=b.dataset.pw;
+        showModal(`<div class="modal-head"><h3>Passwort ändern</h3><button class="modal-x" type="button" aria-label="Schließen" onclick="closeModal()">✕</button></div>
+            <div class="form"><p class="dialog-copy">Neues Passwort für <b>${esc(username)}</b> eingeben.</p>
+            <label class="fl" for="f_new_password">Neues Passwort<input id="f_new_password" type="password" autocomplete="new-password" placeholder="Neues Passwort"></label>
+            <p id="modalError" class="form-error hidden" role="alert"></p>
+            <div class="modal-actions"><button class="actbtn" type="button" onclick="closeModal()">Abbrechen</button><button id="savePassword" class="btn-primary sm" type="button">Passwort speichern</button></div></div>`, 'f_new_password');
+        $('savePassword').addEventListener('click',async()=>{
+            const password=$('f_new_password').value;
+            if(!password.trim())return setFormError('Bitte gib ein neues Passwort ein.','f_new_password');
+            const button=$('savePassword');button.disabled=true;
+            const result=await api('users/password',{method:'POST',body:JSON.stringify({username,password})});
+            if(result.status===200){closeModal();toast('Passwort geändert','ok');}
+            else {setFormError(result.body.error||'Passwort konnte nicht geändert werden.','f_new_password');button.disabled=false;}
+        });
     }));
     window._roles=roles;
 }
 $('addUserBtn').addEventListener('click',()=>{
     const roles=window._roles||['admin','moderator','viewer'];
-    $('modalInner').innerHTML=`<div class="modal-head"><h3>Benutzer hinzufügen</h3><button class="modal-x" onclick="closeModal()">✕</button></div>
+    $('modalInner').innerHTML=`<div class="modal-head"><h3>Benutzer hinzufügen</h3><button class="modal-x" type="button" aria-label="Schließen" onclick="closeModal()">✕</button></div>
     <div class="form">
-      <label class="fl">Benutzername<input id="f_uname" placeholder="z.B. max"/></label>
-      <label class="fl">Passwort<input id="f_upass" type="password" placeholder="Passwort"/></label>
+      <label class="fl" for="f_uname">Benutzername<input id="f_uname" placeholder="z.B. max" autocomplete="username"/></label>
+      <label class="fl" for="f_upass">Passwort<input id="f_upass" type="password" placeholder="Passwort" autocomplete="new-password"/></label>
       <label class="fl">Rolle<select id="f_urole" class="sin">${roles.filter(r=>r!=='owner').map(r=>`<option value="${r}">${r}</option>`).join('')}</select></label>
-      <button class="btn-primary" onclick="submitUser()">Erstellen</button>
+      <p id="modalError" class="form-error hidden" role="alert"></p><button class="btn-primary" type="button" onclick="submitUser()">Erstellen</button>
     </div>`;
-    $('modal').classList.remove('hidden');
+    $('modal').classList.remove('hidden');requestAnimationFrame(()=>$('f_uname').focus());
 });
 window.submitUser=async()=>{
     const b={username:$('f_uname').value,password:$('f_upass').value,role:$('f_urole').value};
-    if(!b.username||!b.password)return toast('Benutzername & Passwort nötig','err');
+    if(!b.username.trim())return setFormError('Bitte gib einen Benutzernamen ein.','f_uname');
+    if(!b.password.trim())return setFormError('Bitte gib ein Passwort ein.','f_upass');
     const r=await api('users',{method:'POST',body:JSON.stringify(b)});
-    if(r.status===200){toast('Benutzer erstellt','ok');closeModal();loadUsers();}else toast('Fehler: '+(r.body.error||''),'err');
+    if(r.status===200){toast('Benutzer erstellt','ok');closeModal();loadUsers();}else setFormError(r.body.error||'Benutzer konnte nicht erstellt werden.','f_uname');
 };
 
 // ============================================================
@@ -404,25 +503,29 @@ async function loadWhitelist(){
         <td class="cell-sub">${fmtDate(w.created_at)}</td>
         <td><button class="actbtn ban" data-wl="${esc(w.license)}">Entfernen</button></td></tr>`).join('')
         ||'<tr><td colspan="5" class="empty">Keine Spieler auf der Whitelist.</td></tr>';
-    $('wlBody').querySelectorAll('[data-wl]').forEach(b=>b.addEventListener('click',async()=>{
-        const r=await api('removewl',{method:'POST',body:JSON.stringify({license:b.dataset.wl})});
-        if(r.status===200){toast('Von Whitelist entfernt','ok');loadWhitelist();}else toast('Fehler: '+(r.body.error||''),'err');
+    $('wlBody').querySelectorAll('[data-wl]').forEach(b=>b.addEventListener('click',()=>{
+        const license=b.dataset.wl;
+        openConfirmDialog('Whitelist-Eintrag entfernen',`Spieler ${license} wirklich von der Whitelist entfernen?`,'Entfernen',async()=>{
+            const result=await api('removewl',{method:'POST',body:JSON.stringify({license})});
+            if(result.status===200){toast('Von Whitelist entfernt','ok');loadWhitelist();return {ok:true};}
+            return {ok:false,error:result.body.error||'Whitelist-Eintrag konnte nicht entfernt werden.'};
+        });
     }));
 }
 $('addWlBtn').addEventListener('click',()=>{
-    $('modalInner').innerHTML=`<div class="modal-head"><h3>Spieler whitelisten</h3><button class="modal-x" onclick="closeModal()">✕</button></div>
+    $('modalInner').innerHTML=`<div class="modal-head"><h3>Spieler whitelisten</h3><button class="modal-x" type="button" aria-label="Schließen" onclick="closeModal()">✕</button></div>
     <div class="form">
-      <label class="fl">Lizenz <small style="font-weight:400">(license:xxxx…)</small><input id="f_wllic" placeholder="license:0000000000000000"/></label>
-      <label class="fl">Name (optional)<input id="f_wlname" placeholder="Spielername"/></label>
-      <button class="btn-primary" onclick="submitWl()">Zur Whitelist hinzufügen</button>
+      <label class="fl" for="f_wllic">Lizenz <small style="font-weight:400">(license:xxxx…)</small><input id="f_wllic" placeholder="license:0000000000000000"/></label>
+      <label class="fl" for="f_wlname">Name (optional)<input id="f_wlname" placeholder="Spielername"/></label>
+      <p id="modalError" class="form-error hidden" role="alert"></p><button class="btn-primary" type="button" onclick="submitWl()">Zur Whitelist hinzufügen</button>
     </div>`;
-    $('modal').classList.remove('hidden');
+    $('modal').classList.remove('hidden');requestAnimationFrame(()=>$('f_wllic').focus());
 });
 window.submitWl=async()=>{
     const b={license:$('f_wllic').value.trim(),name:$('f_wlname').value.trim(),by:myUser};
-    if(!b.license)return toast('Lizenz nötig','err');
+    if(!b.license)return setFormError('Bitte gib eine Lizenz ein.','f_wllic');
     const r=await api('addwl',{method:'POST',body:JSON.stringify(b)});
-    if(r.status===200){toast('Spieler gewhitelistet','ok');closeModal();loadWhitelist();}else toast('Fehler: '+(r.body.error||''),'err');
+    if(r.status===200){toast('Spieler gewhitelistet','ok');closeModal();loadWhitelist();}else setFormError(r.body.error||'Spieler konnte nicht hinzugefügt werden.','f_wllic');
 };
 
 checkAuth();
